@@ -5,8 +5,6 @@ import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-import javax.imageio.ImageIO;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -15,7 +13,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.InputSplit;
@@ -29,9 +26,9 @@ import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.hadoop.mapreduce.lib.input.MultipleInputs;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.LazyOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
 import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
-import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.LineReader;
 
 public class BinaryFilesToHadoopSequenceFile {
@@ -42,36 +39,49 @@ public class BinaryFilesToHadoopSequenceFile {
 	public static class ImageToSequenceFileMapper extends
 			Mapper<Object, Text, Text, BytesWritable> {
 
+		private static int reducerNumber = 0;
+
 		public void map(Object key, Text value, Context context)
 				throws IOException, InterruptedException {
 
-			logger.info("map method called..");
+			// logger.info("map method called.. with value: " +
+			// value.toString());
+			// logger.info(context.getConfiguration().get("NLINESTOPROCESS"));
+			String lines[] = value.toString().split("\n");
+			int numLines = lines.length;
+			logger.info("received " + numLines + " files\n");
+			int numReducers = Integer.parseInt(context.getConfiguration().get(
+					"NUMREDUCERS"));
 
-			String uri = value.toString();
 			Configuration conf = new Configuration();
-			FileSystem fs = FileSystem.get(URI.create(uri), conf);
-			FSDataInputStream in = null;
-			BufferedImage b;
-			try {
-				in = fs.open(new Path(uri));
-				b = ImageIO.read(in);
-				int height = b.getHeight();
-				int width = b.getWidth();
-				String s = "@@" + height + "X" + width + "@@";
-				in.seek(0);
-				BytesWritable v = new BytesWritable(
-						org.apache.commons.io.IOUtils.toByteArray(in));
-				// while( in.read(buffer, 0, buffer.length) >= 0 ) {
-				// bout.write(buffer);
-				// }
-				s = value.toString() + s;
-				value.set(s);
-				context.write(value, v);
-			} finally {
-				IOUtils.closeStream(in);
+			for (int i = 0; i < numLines; i++) {
+				String uri = lines[i].toString();
+				FileSystem fs = FileSystem.get(URI.create(uri), conf);
+				FSDataInputStream in = null;
+				BufferedImage b;
+				try {
+					in = fs.open(new Path(uri));
+					// b = ImageIO.read(in);
+					// int height = b.getHeight();
+					// int width = b.getWidth();
+					// String s = "@@" + height + "X" + width + "@@";
+					in.seek(0);
+					BytesWritable v = new BytesWritable(
+							org.apache.commons.io.IOUtils.toByteArray(in));
+					// while( in.read(buffer, 0, buffer.length) >= 0 ) {
+					// bout.write(buffer);
+					// }
+					String s = lines[i].toString() + "_r_"
+							+ Integer.toString(reducerNumber % numReducers);
+					value.set(s);
+					context.write(value, v);
+					logger.info("emiiting key - " + s);
+					reducerNumber++;
+				} finally {
+					IOUtils.closeStream(in);
+				}
 			}
 		}
-
 	}
 
 	public static class SequenceFilePartitioner extends
@@ -81,28 +91,55 @@ public class BinaryFilesToHadoopSequenceFile {
 		public int getPartition(Text key, BytesWritable value,
 				int numReduceTasks) {
 
-			char r = key.toString().charAt(0);
-
-			int target = r - 48;
-			return target % numReduceTasks;
-
+			String a[] = key.toString().split("_r_");
+			logger.info("sending " + key.toString() + " to " + a[a.length - 1]);
+			return Integer.parseInt(a[a.length - 1]);
 		}
 	}
 
 	public static class ImageToSequenceFileReducer extends
-			Reducer<Text, IntWritable, Text, IntWritable> {
+			Reducer<Text, BytesWritable, Text, BytesWritable> {
 
-		// MultipleOutputs msfw;
+		private MultipleOutputs mos;
+
+		protected void setup(Context context) throws IOException,
+				InterruptedException {
+			mos = new MultipleOutputs(context);
+		}
+
+		protected void cleanup(Context context) throws IOException,
+				InterruptedException {
+			mos.close();
+		}
 
 		@Override
-		public void reduce(Text key, Iterable<IntWritable> values,
+		public void reduce(Text key, Iterable<BytesWritable> values,
 				Context context) throws IOException, InterruptedException {
-			// msfw.w
+			String filename = getFilenameFromKey(key);
+			filename = context.getConfiguration().get("BASE_OUTPUT_FILE_NAME")
+					+ "n" + filename;
+			for (BytesWritable value : values) {
+				mos.write(key, value, filename);
+			}
+		}
+
+		private String getFilenameFromKey(Text key) {
+			String a[] = key.toString().split("_r_");
+			return a[a.length - 1];
 		}
 	}
 
-	public class NLinesRecordReader extends RecordReader<LongWritable, Text> {
-		private int NLINESTOPROCESS = 1;
+	public static class NLinesInputFormat extends TextInputFormat {
+		public RecordReader<LongWritable, Text> createRecordReader(
+				InputSplit split, TaskAttemptContext context) {
+			logger.info("new recordreader() being called\n");
+			return new NLinesRecordReader();
+		}
+	}
+
+	public static class NLinesRecordReader extends
+			RecordReader<LongWritable, Text> {
+		private int NLINESTOPROCESS = 3;
 		private LineReader in;
 		private LongWritable key;
 		private Text value = new Text();
@@ -110,6 +147,9 @@ public class BinaryFilesToHadoopSequenceFile {
 		private long end = 0;
 		private long pos = 0;
 		private int maxLineLength;
+
+		// private Log logger = LogFactory
+		// .getLog(NLinesRecordReader.class);
 
 		@Override
 		public void close() throws IOException {
@@ -148,8 +188,11 @@ public class BinaryFilesToHadoopSequenceFile {
 
 			// get the parameter from the configuration
 			NLINESTOPROCESS = Integer.parseInt(conf.get("NLINESTOPROCESS"));
+			logger.info("initialize() called.., nltp = "
+					+ Integer.toString(NLINESTOPROCESS));
+
 			this.maxLineLength = conf.getInt(
-					"mapred.linerecordreader.maxlength", Integer.MAX_VALUE);
+					"mapreduce.linerecordreader.maxlength", Integer.MAX_VALUE);
 			FileSystem fs = file.getFileSystem(conf);
 			start = split.getStart();
 			end = start + split.getLength();
@@ -171,6 +214,7 @@ public class BinaryFilesToHadoopSequenceFile {
 
 		@Override
 		public boolean nextKeyValue() throws IOException, InterruptedException {
+			logger.info("nextKeyValue() called\n");
 			if (key == null) {
 				key = new LongWritable();
 			}
@@ -211,11 +255,7 @@ public class BinaryFilesToHadoopSequenceFile {
 	}
 
 	public static void main(String[] args) throws Exception {
-		Configuration conf = new Configuration();
-		// JobConf j;
-		String[] otherArgs = new GenericOptionsParser(conf, args)
-				.getRemainingArgs();
-		if (otherArgs.length < 3) {
+		if (args.length < 3) {
 			System.err
 					.println("Usage: BinaryFilesToHadoopSequenceFile <in Path for url file> "
 							+ "<approximate number of image files> "
@@ -223,36 +263,57 @@ public class BinaryFilesToHadoopSequenceFile {
 			System.exit(2);
 		}
 
-		Job job = new Job(conf, "BinaryFilesToHadoopSequenceFile");
+		int numOutputFiles = Integer.parseInt(args[args.length - 1]);
+		int approxInputFiles = Integer.parseInt(args[args.length - 2]);
+
+		if (numOutputFiles < 1) {
+			// someone is screwing around
+			numOutputFiles = 1;
+		}
+
+		DateFormat dateFormat = new SimpleDateFormat("ddMMyyyyHHmmss");
+		Date date = new Date();
+		String outputfolder = "output" + dateFormat.format(date);
+
+		// remember to set conf value before creating job instance
+		Configuration conf = new Configuration();
+		conf.set("BASE_OUTPUT_FILE_NAME", outputfolder);
+		conf.set("NLINESTOPROCESS", Integer
+				.toString(((int) (approxInputFiles / numOutputFiles) + 1)));
+		conf.set("NUMREDUCERS", Integer.toString((int) numOutputFiles));
+
+		Job job = new Job(conf);
 		job.setJarByClass(BinaryFilesToHadoopSequenceFile.class);
 		job.setMapperClass(ImageToSequenceFileMapper.class);
-		// job.setOutputKeyClass(Text.class);
-		// job.setOutputValueClass(BytesWritable.class);
-		job.setInputFormatClass(TextInputFormat.class);
-		job.setOutputFormatClass(SequenceFileOutputFormat.class);
+		job.setReducerClass(ImageToSequenceFileReducer.class);
+		job.setOutputKeyClass(Text.class);
+		job.setOutputValueClass(BytesWritable.class);
+		job.setInputFormatClass(NLinesInputFormat.class);
+		LazyOutputFormat.setOutputFormatClass(job,
+				SequenceFileOutputFormat.class);
+		// job.setOutputFormatClass(SequenceFileOutputFormat.class);
 		//
 		// .addNamedOutput(job, "seq1", SequenceFileOutputFormat.class,
 		// Text.class, BytesWritable.class);
 
-		for (int i = 0; i < args.length - 1; i++) {
+		for (int i = 0; i < args.length - 2; i++) {
 			// FileInputFormat.setInputPaths(job, new Path(args[i]));
 			MultipleInputs.addInputPath(job, new Path(args[i]),
-					TextInputFormat.class);
+					NLinesInputFormat.class);
 		}
 		job.setPartitionerClass(SequenceFilePartitioner.class);
-		job.setNumReduceTasks(10);
-		DateFormat dateFormat = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
-		Date date = new Date();
-		String outputfolder = "output-" + dateFormat.format(date);
 		// FileOutputFormat f = new FileOutputFormat();
 		// FileOutputFormat.setOutputName(job, filename);
 		// job.getConfiguration().set(FileOutputFormat.BASE_OUTPUT_NAME,
 		// filename);
-		conf.set("BASE_OUTPUT_FILE_NAME", outputfolder);
-		int numOutputFiles = Integer.parseInt(args.length)
-		MultipleOutputs
-				.addNamedOutput(job, filename, SequenceFileOutputFormat.class,
-						Text.class, BytesWritable.class);
+		job.setNumReduceTasks(numOutputFiles);
+
+		for (int i = 0; i < numOutputFiles; i++) {
+			MultipleOutputs.addNamedOutput(job,
+					outputfolder + "n" + Integer.toString(i),
+					SequenceFileOutputFormat.class, Text.class,
+					BytesWritable.class);
+		}
 
 		FileOutputFormat.setOutputPath(job, new Path(outputfolder));
 		System.exit(job.waitForCompletion(true) ? 0 : 1);
