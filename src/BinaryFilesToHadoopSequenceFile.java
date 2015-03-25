@@ -1,5 +1,6 @@
-import java.awt.image.BufferedImage;
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.net.URI;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -9,6 +10,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.BytesWritable;
@@ -58,7 +60,7 @@ public class BinaryFilesToHadoopSequenceFile {
 				String uri = lines[i].toString();
 				FileSystem fs = FileSystem.get(URI.create(uri), conf);
 				FSDataInputStream in = null;
-				BufferedImage b;
+				
 				try {
 					in = fs.open(new Path(uri));
 					// b = ImageIO.read(in);
@@ -100,11 +102,11 @@ public class BinaryFilesToHadoopSequenceFile {
 	public static class ImageToSequenceFileReducer extends
 			Reducer<Text, BytesWritable, Text, BytesWritable> {
 
-		private MultipleOutputs mos;
+		private MultipleOutputs<Text, BytesWritable> mos;
 
 		protected void setup(Context context) throws IOException,
 				InterruptedException {
-			mos = new MultipleOutputs(context);
+			mos = new MultipleOutputs<Text, BytesWritable>(context);
 		}
 
 		protected void cleanup(Context context) throws IOException,
@@ -115,11 +117,15 @@ public class BinaryFilesToHadoopSequenceFile {
 		@Override
 		public void reduce(Text key, Iterable<BytesWritable> values,
 				Context context) throws IOException, InterruptedException {
-			String filename = getFilenameFromKey(key);
-			filename = context.getConfiguration().get("BASE_OUTPUT_FILE_NAME")
-					+ "n" + filename;
+			String filename = "n" + getFilenameFromKey(key);
+			/**
+			 * To Do: remove "_r_" from key.
+			 **/
+//			filename = context.getConfiguration().get("BASE_OUTPUT_FILE_NAME")
+//					+ "n" + filename;
 			for (BytesWritable value : values) {
-				mos.write(key, value, filename);
+				//mos.write(key, value, filename);
+				mos.write(filename, key, value);
 			}
 		}
 
@@ -255,25 +261,33 @@ public class BinaryFilesToHadoopSequenceFile {
 	}
 
 	public static void main(String[] args) throws Exception {
-		if (args.length < 3) {
+
+		if (args.length < 4) {
 			System.err
 					.println("Usage: BinaryFilesToHadoopSequenceFile <in Path for url file> "
 							+ "<approximate number of image files> "
-							+ "<number of sequence files to output>");
+							+ "<number of sequence files to output>"
+							+ "<ABSOLUTE path to hdfs locaiton where the output folder "
+							+ "will automatically be created>");
 			System.exit(2);
 		}
 
-		int numOutputFiles = Integer.parseInt(args[args.length - 1]);
-		int approxInputFiles = Integer.parseInt(args[args.length - 2]);
+		int numOutputFiles = Integer.parseInt(args[args.length - 2]);
+		int approxInputFiles = Integer.parseInt(args[args.length - 3]);
 
 		if (numOutputFiles < 1) {
 			// someone is screwing around
 			numOutputFiles = 1;
 		}
+		String absPath = args[args.length - 1];
+		if(absPath.charAt(absPath.length() - 1) != '/'){
+			absPath += "/";
+		}
 
 		DateFormat dateFormat = new SimpleDateFormat("ddMMyyyyHHmmss");
 		Date date = new Date();
-		String outputfolder = "output" + dateFormat.format(date);
+		String outputfolder = absPath + "IToSeq"
+				+ dateFormat.format(date);
 
 		// remember to set conf value before creating job instance
 		Configuration conf = new Configuration();
@@ -282,6 +296,7 @@ public class BinaryFilesToHadoopSequenceFile {
 				.toString(((int) (approxInputFiles / numOutputFiles) + 1)));
 		conf.set("NUMREDUCERS", Integer.toString((int) numOutputFiles));
 
+		@SuppressWarnings("deprecation")
 		Job job = new Job(conf);
 		job.setJarByClass(BinaryFilesToHadoopSequenceFile.class);
 		job.setMapperClass(ImageToSequenceFileMapper.class);
@@ -291,31 +306,36 @@ public class BinaryFilesToHadoopSequenceFile {
 		job.setInputFormatClass(NLinesInputFormat.class);
 		LazyOutputFormat.setOutputFormatClass(job,
 				SequenceFileOutputFormat.class);
-		// job.setOutputFormatClass(SequenceFileOutputFormat.class);
-		//
-		// .addNamedOutput(job, "seq1", SequenceFileOutputFormat.class,
-		// Text.class, BytesWritable.class);
 
-		for (int i = 0; i < args.length - 2; i++) {
-			// FileInputFormat.setInputPaths(job, new Path(args[i]));
+		for (int i = 0; i < args.length - 3; i++) {
 			MultipleInputs.addInputPath(job, new Path(args[i]),
 					NLinesInputFormat.class);
 		}
 		job.setPartitionerClass(SequenceFilePartitioner.class);
-		// FileOutputFormat f = new FileOutputFormat();
-		// FileOutputFormat.setOutputName(job, filename);
-		// job.getConfiguration().set(FileOutputFormat.BASE_OUTPUT_NAME,
-		// filename);
 		job.setNumReduceTasks(numOutputFiles);
 
 		for (int i = 0; i < numOutputFiles; i++) {
 			MultipleOutputs.addNamedOutput(job,
-					outputfolder + "n" + Integer.toString(i),
+					"n" + Integer.toString(i),
 					SequenceFileOutputFormat.class, Text.class,
 					BytesWritable.class);
 		}
 
 		FileOutputFormat.setOutputPath(job, new Path(outputfolder));
+
+		Path f = new Path(absPath + "IToSeq.outputlocation");
+		FileSystem fs = FileSystem.get(conf);
+		if (fs.exists(f)) {
+			// File already exists.
+			// Delete the file before proceeding.
+			logger.info("Deleting existing file");
+			fs.delete(f, true);
+		}
+		FSDataOutputStream os = fs.create(f);
+		BufferedWriter br = new BufferedWriter(new OutputStreamWriter(os,
+				"UTF-8"));
+		br.write(outputfolder);
+		br.close();
 		System.exit(job.waitForCompletion(true) ? 0 : 1);
 	}
 
