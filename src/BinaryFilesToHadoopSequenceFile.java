@@ -60,7 +60,7 @@ public class BinaryFilesToHadoopSequenceFile {
 				String uri = lines[i].toString();
 				FileSystem fs = FileSystem.get(URI.create(uri), conf);
 				FSDataInputStream in = null;
-				
+
 				try {
 					in = fs.open(new Path(uri));
 					// b = ImageIO.read(in);
@@ -121,10 +121,11 @@ public class BinaryFilesToHadoopSequenceFile {
 			/**
 			 * To Do: remove "_r_" from key.
 			 **/
-//			filename = context.getConfiguration().get("BASE_OUTPUT_FILE_NAME")
-//					+ "n" + filename;
+			// filename =
+			// context.getConfiguration().get("BASE_OUTPUT_FILE_NAME")
+			// + "n" + filename;
 			for (BytesWritable value : values) {
-				//mos.write(key, value, filename);
+				// mos.write(key, value, filename);
 				mos.write(filename, key, value);
 			}
 		}
@@ -280,14 +281,13 @@ public class BinaryFilesToHadoopSequenceFile {
 			numOutputFiles = 1;
 		}
 		String absPath = args[args.length - 1];
-		if(absPath.charAt(absPath.length() - 1) != '/'){
+		if (absPath.charAt(absPath.length() - 1) != '/') {
 			absPath += "/";
 		}
 
 		DateFormat dateFormat = new SimpleDateFormat("ddMMyyyyHHmmss");
 		Date date = new Date();
-		String outputfolder = absPath + "IToSeq"
-				+ dateFormat.format(date);
+		String outputfolder = absPath + "IToSeq" + dateFormat.format(date);
 
 		// remember to set conf value before creating job instance
 		Configuration conf = new Configuration();
@@ -315,8 +315,7 @@ public class BinaryFilesToHadoopSequenceFile {
 		job.setNumReduceTasks(numOutputFiles);
 
 		for (int i = 0; i < numOutputFiles; i++) {
-			MultipleOutputs.addNamedOutput(job,
-					"n" + Integer.toString(i),
+			MultipleOutputs.addNamedOutput(job, "n" + Integer.toString(i),
 					SequenceFileOutputFormat.class, Text.class,
 					BytesWritable.class);
 		}
